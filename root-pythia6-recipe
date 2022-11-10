@@ -1,0 +1,105 @@
+FROM deeplearnphysics/larcv2:ub20.04-cuda11.3-cudnn8-pytorch1.10.0
+
+LABEL maintainer="Daniel Douglas"
+LABEL contact="dougl215@slac.stanford.edu"
+LABEL type="gpu"
+LABEL version="ub20.04-cuda11.3-cudnn8-pytorch1.10.0-root-pythia"
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# for user-specific temporary files
+ENV XDG_RUNTIME_DIR=/tmp/$USER
+
+ENV BUILD_SW="gfortran python2.7 autoconf automake python3-pkgconfig libtool"
+ENV RETREVAL_SW="subversion openssh-client openssl"
+
+ENV X11_UTILS="x11-utils"
+ENV X11_LIBS="libxt-dev libxpm-dev libxft-dev libxext-dev"
+
+ENV GRAPHICS_LIBS="libglu1-mesa-dev libglw1-mesa libglew-dev libmotif-dev libpng-dev libjpeg-turbo8-dev libftgl-dev libgl2ps-dev"
+ENV DEVEL_LIBS="libxml2-dev libgmp-dev libgsl-dev liblog4cpp5-dev libbz2-dev libpcre2-dev liblzma-dev zlib1g-dev libfreetype-dev libfftw3-dev libblas-dev liblapack-dev libxxhash-dev liblz4-dev"
+ENV MISC_SW="vim nano gdb csh tcsh zsh ed quota python3-dev patch emacs"
+
+RUN apt-key del 7fa2af80 && \
+    apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/3bf863cc.pub
+RUN apt-get update
+
+# RUN apt-get install -y gfortran python2.7
+RUN apt-get install -y \
+    ${BUILD_SW} \
+    ${RETREVAL_SW} \
+    ${X11_UTILS} \
+    ${X11_LIBS} \
+    ${GRAPHICS_LIBS} \
+    ${DEVEL_LIBS} \
+    ${MISC_SW}
+
+# Use 6 cores when building
+ENV NCORES=6
+    
+## Get a copy of ROOT
+RUN mkdir -p /app
+RUN git clone -b v6-14-06 --depth 1 --single-branch https://github.com/root-project/root.git /app/root
+
+## Get PYTHIA6 (with specific placement for NuWro)
+RUN cd /app && \
+    wget --no-check-certificate http://root.cern.ch/download/pythia6.tar.gz && \
+    tar -xzvf pythia6.tar.gz && \
+    rm pythia6.tar.gz && \
+    wget --no-check-certificate https://pythia.org/download/pythia6/pythia6428.f && \
+    mv pythia6428.f pythia6/pythia6428.f && \
+    rm pythia6/pythia6416.f
+
+## Build PYTHIA6 and copy to where NuWro expects it
+RUN cd /app/pythia6 && \
+    ./makePythia6.linuxx8664 && \
+    mkdir /app/root/lib && \
+    cp /app/pythia6/libPythia6.so /app/root/lib/.
+
+# Now build root
+RUN mkdir /app/root/install && \
+    cd /app/root/install && \
+    cmake -DPYTHIA6_LIBRARY=/app/root/lib/libPythia6.so \
+    	  -DCMAKE_CXX_STANDARD=14 \
+	  -Dcxx11=OFF \
+	  -Dcxx14=ON \
+	  -Dpythia6=ON \
+	  -Dminuit2=ON \
+	  -Dmathmore=ON \
+	  -Ddavix=OFF \
+    	  -Dfitsio=OFF \
+	  -Dgfal=OFF \
+	  -Dcastor=OFF \
+	  -Dclad=OFF \
+	  -Dhttp=OFF \
+	  -Droot7=OFF \
+	  -Dwebgui=OFF \
+	  -Dxrootd=OFF \
+	  -Dmlp=OFF \
+	  -Dmysql=OFF \
+	  -Doracle=OFF \
+	  -Dpgsql=OFF \
+	  -Droofit=OFF \
+	  -Dspectrum=OFF \
+	  -Dsqlite=OFF \
+	  -Ddataframe=OFF \
+	  -Dimt=OFF \
+	  -Dtmva=OFF \
+	  -Dtmva-cpu=OFF \
+	  -Dtmva-pymva=OFF \
+	  -Dssl=OFF \
+	  -Dcudnn=OFF \
+	  -Dexceptions=OFF \
+	  -Dgdml=ON \
+	  -Dbuiltin_clang=ON \
+	  -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+	  -Dpython3=ON \
+	  -Dvdt=OFF \
+	  -Dbuiltin_vdt=OFF \
+	  ../ && \
+    make -j ${NCORES}
+
+# environment variables
+ENV APP_DIR=/app
+ENV ROOTSYS=/app/root/install
+RUN bash $ROOTSYS/bin/thisroot.sh

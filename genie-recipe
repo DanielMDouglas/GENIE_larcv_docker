@@ -1,0 +1,169 @@
+FROM ub20.04-cuda11.3-cudnn8-pytorch1.10.0-root-pythia:latest
+
+LABEL maintainer="Daniel Douglas"
+LABEL contact="dougl215@slac.stanford.edu"
+LABEL type="gpu"
+LABEL version="ub20.04-cuda11.3-cudnn8-pytorch1.10.0-genie"
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# for user-specific temporary files
+ENV XDG_RUNTIME_DIR=/tmp/$USER
+
+# root
+ENV ROOTSYS=/app/root/install
+ENV PATH="${ROOTSYS}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${ROOTSYS}/lib:${LD_LIBRARY_PATH}"
+ENV PYTHONPATH="${ROOTSYS}/lib:${PYTHONPATH}"
+
+ENV G4_REQS="libxerces-c3.2 libxerces-c-dev"
+ENV X11_REQS="libgl1-mesa-dri"
+ENV ROOT_H5_REQS="python3-numpy python3-fire python3-h5py"
+ENV LHAPDF_REQS="python2.7"
+ENV GENIE_REQS="libxml2 libxml2-dev liblog4cpp5v5 liblog4cpp5-dev"
+
+RUN apt-get install -y \
+    ${G4_REQS} \
+    ${X11_REQS} \
+    ${ROOT_H5_REQS} \
+    ${LHAPDF_REQS} \
+    ${GENIE_REQS}
+
+## This should be set as desired!
+ENV NCORES=6
+    
+## Set up paths for things already in the container
+ENV ROOTSYS=/app/root/install
+ENV PATH=$ROOTSYS/bin:$PATH
+ENV LD_LIBRARY_PATH=$ROOTSYS/lib:/usr/lib64:$LD_LIBRARY_PATH
+ENV PYTHONPATH=${ROOTSYS}/lib:${PYTHONPATH}
+ENV FFLAGS="-std=legacy"
+
+# # GENIE dependencies
+
+# Now LHAPDF (old version)
+RUN ln -s /bin/python2.7 /bin/python
+RUN mkdir /app/LHAPDF
+RUN cd /app/LHAPDF && \
+    wget https://lhapdf.hepforge.org/downloads/old/lhapdf-5.9.1.tar.gz && \
+    tar xzf lhapdf-5.9.1.tar.gz && \
+    rm lhapdf-5.9.1.tar.gz && \
+    mkdir lhapdf-5.9.1_build && \
+    cd lhapdf-5.9.1 && \
+    ./configure --prefix=${PWD}/../lhapdf-5.9.1_build && \
+    make -j ${NCORES} && make install
+ENV LHAPATH=/app/LHAPDF/lhapdf-5.9.1_build/include/LHAPDF
+ENV LHAPDF_INC=/app/LHAPDF/lhapdf-5.9.1_build/include
+ENV LHAPDF_LIB=/app/LHAPDF/lhapdf-5.9.1_build/lib
+
+## Get the GENIE code, v3.00.06 here
+ENV GENIE_VERSION=R-3_00_06
+RUN mkdir -p /app/GENIE
+RUN git clone -b ${GENIE_VERSION} https://github.com/GENIE-MC/Generator.git /app/GENIE/${GENIE_VERSION}
+ENV GENIE=/app/GENIE/${GENIE_VERSION}
+
+## Setup all the required paths
+ENV PYTHIA6=/app/root/lib
+ENV GSL_LIB=/usr/lib64
+ENV GSL_INC=/usr/include
+ENV LIBXML2_INC=/usr/include/libxml2
+ENV LIBXML2_LIB=/usr/lib64
+
+## Need to copy a file from GENIE into LHAPDF... pretty mad!
+RUN cp ${GENIE}/data/evgen/pdfs/GRV98lo_patched.LHgrid ${LHAPATH}/.
+
+## Configure GENIE
+RUN cd ${GENIE} && \
+    sed -i 's/g77/gfortran/g' src/make/Make.include && \
+    ./configure --enable-fnal \
+		--with-pythia6-lib=$PYTHIA6 \
+		--with-lhapdf5-inc=$LHAPDF_INC \
+		--with-lhapdf5-lib=$LHAPDF_LIB \
+		--with-libxml2-inc=$LIBXML2_INC \
+		--with-libxml2-lib=$LIBXML2_LIB  && \
+    make -j ${NCORES} && \
+    make install
+ENV PATH=$GENIE/bin:${PATH}
+ENV LD_LIBRARY_PATH=$LIBXML2_LIB:$LHAPDF_LIB:$PYTHIA6:$GENIE/lib:$LD_LIBRARY_PATH
+
+## Shut GENIE up when it runs
+RUN cp ${GENIE}/config/Messenger_whisper.xml ${GENIE}/config/Messenger.xml
+
+## Have to mess around with the file to actually shut it up though...
+RUN sed -i '$ d' ${GENIE}/config/Messenger.xml && \
+    echo '  <priority msgstream="ResonanceDecay">      FATAL </priority>' >> ${GENIE}/config/Messenger.xml && \
+    echo '  <priority msgstream="Pythia6Decay">        FATAL </priority>' >> ${GENIE}/config/Messenger.xml && \
+    echo '  <priority msgstream="INukeNucleonCorr">    FATAL </priority>' >> ${GENIE}/config/Messenger.xml && \
+    echo '  <priority msgstream="gevgen_fnal">         FATAL </priority>' >> ${GENIE}/config/Messenger.xml && \
+    echo '</messenger_config>' >> ${GENIE}/config/Messenger.xml
+
+## Get DK2NU sorted
+RUN cd /app && \
+    git clone https://github.com/NuSoftHEP/dk2nu.git
+ENV DK2NU=/app/dk2nu
+ENV LIBXML2INC=/usr/include/libxml2
+RUN cd ${DK2NU} && \
+    make all
+
+## Get the G4 source code
+RUN cd /app && \
+    git clone -b v10.7.2 https://github.com/Geant4/geant4.git geant4 && \
+    mkdir geant4/install geant4/build && \
+    cd geant4/build && \
+    cmake -DCMAKE_INSTALL_PREFIX=../install \
+	  -DGEANT4_INSTALL_DATA=ON \
+	  -DGEANT4_USE_GDML=ON ../ && \
+    make -j${NCORES} && make install
+
+ENV Geant4_DIR=/app/geant4/install
+
+## Now edep-sim... this puts it in /usr/local, which is fine I guess?
+RUN cd /app && \
+    git clone https://github.com/ClarkMcGrew/edep-sim.git && \
+    wget https://raw.githubusercontent.com/wilkinson-nu/2x2_truth_studies/main/images/EDepSimRootGeometryManager.patch && \
+    patch edep-sim/src/EDepSimRootGeometryManager.cc EDepSimRootGeometryManager.patch && \
+    rm EDepSimRootGeometryManager.patch && \ 
+    cd /app/edep-sim/build && \ 
+    mkdir ../install && \
+    cmake -DCMAKE_INSTALL_PREFIX=../install ../ && \
+    make -j${NCORES} && make install
+
+# %environment
+
+ENV GENIE=/app/GENIE/R-3_00_06
+ENV LHAPATH=/app/LHAPDF/lhapdf-5.9.1_build/include/LHAPDF
+ENV PYTHIA6=/app/root/lib
+ENV GSL_LIB=/usr/lib64
+ENV GSL_INC=/usr/include
+ENV LHAPDF_INC=/app/LHAPDF/lhapdf-5.9.1_build/include
+ENV LHAPDF_LIB=/app/LHAPDF/lhapdf-5.9.1_build/lib
+ENV LIBXML2_INC=/usr/include/libxml2
+ENV LIBXML2_LIB=/usr/lib64
+    
+ENV GXMLPATH=${GENIE}/genie_xsec
+ENV DK2NU=/app/dk2nu
+
+ENV G4NEUTRONHPDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4NDL4.6
+ENV G4LEDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4EMLOW7.13
+ENV G4LEVELGAMMADATA=${Geant4_DIR}/share/Geant4-10.7.2/data/PhotonEvaporation5.7
+ENV G4RADIOACTIVEDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/RadioactiveDecay5.6
+ENV G4PARTICLEXSDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4PARTICLEXS3.1.1
+ENV G4PIIDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4PII1.3
+ENV G4REALSURFACEDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/RealSurface2.2
+ENV G4SAIDXSDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4SAIDDATA2.0
+ENV G4ABLADATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4ABLA3.1
+ENV G4INCLDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4INCL1.0
+ENV G4ENSDFSTATEDATA=${Geant4_DIR}/share/Geant4-10.7.2/data/G4ENSDFSTATE2.3
+
+ENV EDEPSIM=/app/edep-sim/install
+
+ENV PATH=$GENIE/bin:$PATH
+ENV PATH=${Geant4_DIR}/bin:$PATH
+ENV PATH=${EDEPSIM}/bin:${PATH}
+
+ENV LD_LIBRARY_PATH=${DK2NU}/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=$LIBXML2_LIB:$LHAPDF_LIB:$PYTHIA6:$GENIE/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=${EDEPSIM}/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=${Geant4_DIR}/lib:$LD_LIBRARY_PATH
+
+RUN apt-get autoremove -y && apt-get clean -y
